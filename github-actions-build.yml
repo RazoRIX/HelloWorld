@@ -1,0 +1,41 @@
+name: Build PlayTorrioTV AllDebrid
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout patch pack
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Clone upstream and apply AllDebrid patch
+        run: python3 apply_alldebrid.py --clone PlayTorrioTV-AllDebrid
+
+      - name: Resolve Flutter dependencies
+        working-directory: PlayTorrioTV-AllDebrid
+        run: flutter pub get
+
+      - name: Build split release APKs
+        working-directory: PlayTorrioTV-AllDebrid
+        run: flutter build apk --release --split-per-abi
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlayTorrioTV-AllDebrid-APKs
+          path: PlayTorrioTV-AllDebrid/build/app/outputs/flutter-apk/*-release.apk
+          if-no-files-found: error
