@@ -1,0 +1,164 @@
+package com.playtorrio.tv.data.debrid
+
+import android.util.Log
+import com.playtorrio.tv.data.AppPreferences
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import okhttp3.FormBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+object AllDebridClient {
+    private const val TAG = "AllDebridClient"
+    private const val BASE = "https://api.alldebrid.com"
+
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    private data class AdFile(val path: String, val size: Long, val link: String)
+
+    suspend fun resolve(
+        magnetUri: String,
+        isMovie: Boolean = true,
+        season: Int? = null,
+        episode: Int? = null,
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val apiKey = AppPreferences.allDebridApiKey.trim()
+            if (apiKey.isEmpty()) {
+                Log.w(TAG, "No API key configured")
+                return@withContext null
+            }
+
+            val upload = post(
+                "$BASE/v4/magnet/upload",
+                apiKey,
+                FormBody.Builder().add("magnets[]", magnetUri).build()
+            )
+            val uploadData = decodeData(upload) ?: return@withContext null
+            val uploaded = uploadData.optJSONArray("magnets")
+            if (uploaded == null || uploaded.length() == 0) return@withContext null
+
+            val magnet = uploaded.optJSONObject(0) ?: return@withContext null
+            magnet.optJSONObject("error")?.let {
+                Log.w(TAG, "Upload error: ${it.optString("code")} - ${it.optString("message")}")
+                return@withContext null
+            }
+
+            val magnetId = magnet.optLong("id", -1L)
+            if (magnetId <= 0) return@withContext null
+
+            var ready = magnet.optBoolean("ready", false)
+            var attempts = 0
+            while (!ready && attempts < 40) {
+                val status = post(
+                    "$BASE/v4.1/magnet/status",
+                    apiKey,
+                    FormBody.Builder().add("id", magnetId.toString()).build()
+                )
+                val data = decodeData(status) ?: return@withContext null
+                val value = data.opt("magnets")
+                val obj = when (value) {
+                    is JSONObject -> value
+                    is JSONArray -> if (value.length() > 0) value.optJSONObject(0) else null
+                    else -> null
+                }
+
+                val code = obj?.optInt("statusCode", -1) ?: -1
+                if (code == 4) {
+                    ready = true
+                    break
+                }
+                if (code >= 5) {
+                    Log.w(TAG, "Magnet failed: ${obj?.optString("status")} ($code)")
+                    return@withContext null
+                }
+                attempts++
+                delay(3000)
+            }
+            if (!ready) return@withContext null
+
+            val filesResponse = post(
+                "$BASE/v4/magnet/files",
+                apiKey,
+                FormBody.Builder().add("id[]", magnetId.toString()).build()
+            )
+            val filesData = decodeData(filesResponse) ?: return@withContext null
+            val magnets = filesData.optJSONArray("magnets")
+            if (magnets == null || magnets.length() == 0) return@withContext null
+
+            val magnetFiles = magnets.optJSONObject(0) ?: return@withContext null
+            magnetFiles.optJSONObject("error")?.let {
+                Log.w(TAG, "Files error: ${it.optString("code")} - ${it.optString("message")}")
+                return@withContext null
+            }
+
+            val flat = mutableListOf<AdFile>()
+            flatten(magnetFiles.optJSONArray("files"), "", flat)
+            if (flat.isEmpty()) return@withContext null
+
+            val candidates = flat.mapIndexed { index, f -> Triple(index, f.path, f.size) }
+            val pickedIndex = EpisodeFileMatcher.pickFile(
+                candidates, isMovie, season, episode
+            ) ?: return@withContext null
+            val picked = flat[pickedIndex]
+            if (picked.link.isBlank()) return@withContext null
+
+            val unlockResponse = post(
+                "$BASE/v4/link/unlock",
+                apiKey,
+                FormBody.Builder().add("link", picked.link).build()
+            )
+            val unlock = decodeData(unlockResponse) ?: return@withContext null
+            unlock.optString("link", "").takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resolving via AllDebrid", e)
+            null
+        }
+    }
+
+    private fun post(url: String, apiKey: String, body: FormBody): String? {
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $apiKey")
+            .post(body)
+            .build()
+        return http.newCall(request).execute().use { it.body?.string() }
+    }
+
+    private fun decodeData(raw: String?): JSONObject? {
+        if (raw.isNullOrBlank()) return null
+        val root = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        if (root.optString("status") == "error") {
+            val error = root.optJSONObject("error")
+            Log.w(TAG, "API error: ${error?.optString("code")} - ${error?.optString("message")}")
+            return null
+        }
+        return root.optJSONObject("data")
+    }
+
+    private fun flatten(nodes: JSONArray?, prefix: String, out: MutableList<AdFile>) {
+        if (nodes == null) return
+        for (i in 0 until nodes.length()) {
+            val node = nodes.optJSONObject(i) ?: continue
+            val name = node.optString("n", "")
+            val path = if (prefix.isEmpty()) name else "$prefix/$name"
+            val children = node.optJSONArray("e")
+            if (children != null) {
+                flatten(children, path, out)
+            } else {
+                out += AdFile(
+                    path = path,
+                    size = node.optLong("s", 0L),
+                    link = node.optString("l", "")
+                )
+            }
+        }
+    }
+}
