@@ -12,6 +12,27 @@ def apply_replacements(path, items):
     for old, new, label in items:
         if new in text:
             continue
+
+        if old not in text and label == "remote key-change detection":
+            pattern = (
+                r'val\s+debridKeyChanged\s*=\s*'
+                r'\(change\.proposedRealDebridApiKey\s*!=\s*AppPreferences\.realDebridApiKey\)\s*\|\|\s*'
+                r'\(change\.proposedTorboxApiKey\s*!=\s*AppPreferences\.torboxApiKey\)'
+            )
+            match = re.search(pattern, text, flags=re.MULTILINE)
+            if not match:
+                raise RuntimeError(f"Could not find patch point in {path}: {label}")
+            indent = text[text.rfind("\n", 0, match.start()) + 1:match.start()]
+            replacement = (
+                "val debridKeyChanged = "
+                "(change.proposedRealDebridApiKey != AppPreferences.realDebridApiKey) ||\n"
+                + indent + "    (change.proposedTorboxApiKey != AppPreferences.torboxApiKey) ||\n"
+                + indent + "    (change.proposedAllDebridApiKey != AppPreferences.allDebridApiKey)"
+            )
+            text = text[:match.start()] + replacement + text[match.end():]
+            changed = True
+            continue
+
         if old not in text:
             raise RuntimeError(f"Could not find patch point in {path}: {label}")
         text = text.replace(old, new, 1)
