@@ -23,7 +23,11 @@ jobs:
           cache: true
 
       - name: Clone upstream and apply AllDebrid patch
-        run: python3 apply_alldebrid.py --clone PlayTorrioTV-AllDebrid
+        run: |
+        SCRIPT=$(find . -name "apply_alldebrid.py" -type f | head -n 1)
+        echo "Found script: $SCRIPT"
+        test -n "$SCRIPT"
+        python3 "$SCRIPT" --clone PlayTorrioTV-AllDebrid
 
       - name: Resolve Flutter dependencies
         working-directory: PlayTorrioTV-AllDebrid
